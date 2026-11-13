@@ -10,17 +10,10 @@ const DEFAULT_LINKS = [
   'https://example.com/link-2',
 ];
 
-// Cryptographically secure Fisher-Yates shuffle
-function secureShuffle(array) {
-  const shuffled = [...array];
-  const randomValues = new Uint32Array(shuffled.length);
-  crypto.getRandomValues(randomValues);
-
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = randomValues[i] % (i + 1);
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  return shuffled;
+function secureRandomIndex(max) {
+  const randomBuffer = new Uint32Array(1);
+  crypto.getRandomValues(randomBuffer);
+  return randomBuffer[0] % max;
 }
 
 export default {
@@ -83,12 +76,15 @@ export default {
 
       if (commandName === 'uploadlinks') {
         const rawInput = interaction.data.options?.[0]?.value || '';
-        const newLinks = rawInput
+        const parsedLinks = rawInput
           .split(/[\s,]+/)
           .map((link) => link.trim())
           .filter((link) => link.startsWith('http://') || link.startsWith('https://'));
 
-        if (newLinks.length === 0) {
+        // Remove duplicate URLs automatically
+        const uniqueLinks = [...new Set(parsedLinks)];
+
+        if (uniqueLinks.length === 0) {
           return Response.json({
             type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
@@ -98,14 +94,12 @@ export default {
           });
         }
 
-        // Save full batch and reset the shuffled deck
-        await env.LINKS_KV.put('active_batch', JSON.stringify(newLinks));
-        await env.LINKS_KV.put('shuffled_deck', JSON.stringify(secureShuffle(newLinks)));
+        await env.LINKS_KV.put('active_batch', JSON.stringify(uniqueLinks));
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `Deleted the previous batch and uploaded **${newLinks.length}** new links!`,
+            content: `Deleted the previous batch and uploaded **${uniqueLinks.length}** unique links!`,
             flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
@@ -113,7 +107,6 @@ export default {
 
       if (commandName === 'clearlinks') {
         await env.LINKS_KV.delete('active_batch');
-        await env.LINKS_KV.delete('shuffled_deck');
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -151,18 +144,25 @@ export default {
           });
         }
 
-        // Pull from the shuffled deck; reshuffle when empty
-        const storedDeck = await env.LINKS_KV.get('shuffled_deck');
-        let deck = storedDeck ? JSON.parse(storedDeck) : [];
+        const userId = interaction.member?.user?.id || interaction.user?.id;
 
-        if (deck.length === 0) {
-          deck = secureShuffle(allLinks);
+        // Check the last 3 links sent to this specific user to avoid repeats
+        const userHistoryKey = `history_${userId}`;
+        const rawHistory = await env.LINKS_KV.get(userHistoryKey);
+        const recentLinks = rawHistory ? JSON.parse(rawHistory) : [];
+
+        // Filter out recently sent links if there are enough choices
+        let availableLinks = allLinks.filter((link) => !recentLinks.includes(link));
+        if (availableLinks.length === 0) {
+          availableLinks = allLinks;
         }
 
-        const randomLink = deck.pop();
-        await env.LINKS_KV.put('shuffled_deck', JSON.stringify(deck));
+        const randomLink = availableLinks[secureRandomIndex(availableLinks.length)];
 
-        const userId = interaction.member?.user?.id || interaction.user?.id;
+        // Update user's recent history (keep up to half the batch size, max 10)
+        const maxHistory = Math.min(10, Math.max(1, allLinks.length - 1));
+        const updatedHistory = [randomLink, ...recentLinks].slice(0, maxHistory);
+        await env.LINKS_KV.put(userHistoryKey, JSON.stringify(updatedHistory));
 
         // Open DM channel with user
         const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
