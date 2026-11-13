@@ -5,11 +5,23 @@ import {
   verifyKey,
 } from 'discord-interactions';
 
-// Fallback links if KV is empty (set to [] if you want it empty after /clearlinks)
 const DEFAULT_LINKS = [
   'https://example.com/link-1',
   'https://example.com/link-2',
 ];
+
+// Cryptographically secure Fisher-Yates shuffle
+function secureShuffle(array) {
+  const shuffled = [...array];
+  const randomValues = new Uint32Array(shuffled.length);
+  crypto.getRandomValues(randomValues);
+
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = randomValues[i] % (i + 1);
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -41,7 +53,6 @@ export default {
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
       const commandName = interaction.data.name;
 
-      // /setup -> Posts the Embed + Button
       if (commandName === 'setup') {
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -70,7 +81,6 @@ export default {
         });
       }
 
-      // /uploadlinks -> Replaces the previous batch with a new list
       if (commandName === 'uploadlinks') {
         const rawInput = interaction.data.options?.[0]?.value || '';
         const newLinks = rawInput
@@ -88,7 +98,9 @@ export default {
           });
         }
 
+        // Save full batch and reset the shuffled deck
         await env.LINKS_KV.put('active_batch', JSON.stringify(newLinks));
+        await env.LINKS_KV.put('shuffled_deck', JSON.stringify(secureShuffle(newLinks)));
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -99,9 +111,9 @@ export default {
         });
       }
 
-      // /clearlinks -> Deletes the current batch completely
       if (commandName === 'clearlinks') {
         await env.LINKS_KV.delete('active_batch');
+        await env.LINKS_KV.delete('shuffled_deck');
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -117,9 +129,9 @@ export default {
     if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
       if (interaction.data.custom_id === 'dispense_random_link') {
         const storedBatch = await env.LINKS_KV.get('active_batch');
-        const links = storedBatch ? JSON.parse(storedBatch) : DEFAULT_LINKS;
+        const allLinks = storedBatch ? JSON.parse(storedBatch) : DEFAULT_LINKS;
 
-        if (!links || links.length === 0) {
+        if (!allLinks || allLinks.length === 0) {
           return Response.json({
             type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
@@ -139,8 +151,18 @@ export default {
           });
         }
 
+        // Pull from the shuffled deck; reshuffle when empty
+        const storedDeck = await env.LINKS_KV.get('shuffled_deck');
+        let deck = storedDeck ? JSON.parse(storedDeck) : [];
+
+        if (deck.length === 0) {
+          deck = secureShuffle(allLinks);
+        }
+
+        const randomLink = deck.pop();
+        await env.LINKS_KV.put('shuffled_deck', JSON.stringify(deck));
+
         const userId = interaction.member?.user?.id || interaction.user?.id;
-        const randomLink = links[Math.floor(Math.random() * links.length)];
 
         // Open DM channel with user
         const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
