@@ -142,9 +142,7 @@ export default {
           .map((link) => link.trim())
           .filter((link) => link.startsWith('http://') || link.startsWith('https://'));
 
-        const uniqueLinks = [...new Set(parsedLinks)];
-
-        if (uniqueLinks.length === 0) {
+        if (parsedLinks.length === 0) {
           return Response.json({
             type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
@@ -154,13 +152,44 @@ export default {
           });
         }
 
-        await env.LINKS_KV.put('active_batch', JSON.stringify(uniqueLinks));
-        await updatePanelMessage(env, uniqueLinks.length);
+        const storedBatch = await env.LINKS_KV.get('active_batch');
+        const existingLinks = storedBatch ? JSON.parse(storedBatch) : [];
+        const combinedLinks = [...new Set([...existingLinks, ...parsedLinks])];
+        const addedCount = combinedLinks.length - existingLinks.length;
+
+        await env.LINKS_KV.put('active_batch', JSON.stringify(combinedLinks));
+        await updatePanelMessage(env, combinedLinks.length);
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `Deleted the previous batch and uploaded **${uniqueLinks.length}** unique links!`,
+            content: `Added **${addedCount}** new links! Total available: **${combinedLinks.length}**.`,
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      if (commandName === 'removelinks') {
+        const rawInput = interaction.data.options?.[0]?.value || '';
+        const toRemove = new Set(
+          rawInput
+            .split(/[\s,]+/)
+            .map((link) => link.trim())
+            .filter(Boolean)
+        );
+
+        const storedBatch = await env.LINKS_KV.get('active_batch');
+        const existingLinks = storedBatch ? JSON.parse(storedBatch) : [];
+        const remainingLinks = existingLinks.filter((link) => !toRemove.has(link));
+        const removedCount = existingLinks.length - remainingLinks.length;
+
+        await env.LINKS_KV.put('active_batch', JSON.stringify(remainingLinks));
+        await updatePanelMessage(env, remainingLinks.length);
+
+        return Response.json({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: `Removed **${removedCount}** link(s). Total remaining: **${remainingLinks.length}**.`,
             flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
@@ -173,7 +202,7 @@ export default {
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: 'Previous link batch deleted. The dispenser is now empty (0 links) until you run `/uploadlinks`.',
+            content: 'All links deleted. The dispenser is now empty (0 links).',
             flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
