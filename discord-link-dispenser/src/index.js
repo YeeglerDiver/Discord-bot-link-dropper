@@ -5,36 +5,11 @@ import {
   verifyKey,
 } from 'discord-interactions';
 
-// Fallback links if KV is empty
+// Fallback links if KV is empty (set to [] if you want it empty after /clearlinks)
 const DEFAULT_LINKS = [
   'https://example.com/link-1',
   'https://example.com/link-2',
 ];
-
-async function sendDirectMessage(userId, content, botToken) {
-  const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bot ${botToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ recipient_id: userId }),
-  });
-
-  if (!dmChannelRes.ok) return false;
-  const dmChannel = await dmChannelRes.json();
-
-  const msgRes = await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bot ${botToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ content }),
-  });
-
-  return msgRes.ok;
-}
 
 export default {
   async fetch(request, env, ctx) {
@@ -98,7 +73,6 @@ export default {
       // /uploadlinks -> Replaces the previous batch with a new list
       if (commandName === 'uploadlinks') {
         const rawInput = interaction.data.options?.[0]?.value || '';
-        // Split by spaces, commas, or newlines and keep valid links
         const newLinks = rawInput
           .split(/[\s,]+/)
           .map((link) => link.trim())
@@ -114,7 +88,6 @@ export default {
           });
         }
 
-        // Overwrite the previous batch in Cloudflare KV
         await env.LINKS_KV.put('active_batch', JSON.stringify(newLinks));
 
         return Response.json({
@@ -156,17 +129,67 @@ export default {
           });
         }
 
+        if (!env.DISCORD_TOKEN) {
+          return Response.json({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: 'Error: `DISCORD_TOKEN` secret is missing in Cloudflare!',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
         const userId = interaction.member?.user?.id || interaction.user?.id;
         const randomLink = links[Math.floor(Math.random() * links.length)];
 
-        ctx.waitUntil(
-          sendDirectMessage(userId, `Here is your link: ${randomLink}`, env.DISCORD_TOKEN)
-        );
+        // Open DM channel with user
+        const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bot ${env.DISCORD_TOKEN.trim()}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ recipient_id: userId }),
+        });
+
+        if (!dmChannelRes.ok) {
+          const errText = await dmChannelRes.text();
+          return Response.json({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: `Failed to open DM (${dmChannelRes.status}): \`${errText}\``,
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        const dmChannel = await dmChannelRes.json();
+
+        // Send link into DM channel
+        const msgRes = await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bot ${env.DISCORD_TOKEN.trim()}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ content: `Here is your link: ${randomLink}` }),
+        });
+
+        if (!msgRes.ok) {
+          const errText = await msgRes.text();
+          return Response.json({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: `Could not send DM (${msgRes.status}): Make sure DMs are enabled for this server! (\`${errText}\`)`,
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: 'Check your DMs! (Make sure your DMs are open for this server.)',
+            content: 'Check your DMs!',
             flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
