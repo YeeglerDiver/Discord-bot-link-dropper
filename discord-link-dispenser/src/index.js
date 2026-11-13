@@ -26,6 +26,47 @@ function getTrulyRandomLink(links, lastLink) {
   return pool[0];
 }
 
+function buildPanelPayload(count) {
+  return {
+    embeds: [
+      {
+        title: 'Link Dispenser',
+        description: `Click the button below to get a random link sent to your DMs.\n\n**Available Links:** ${count}`,
+        color: 0x9b59b6,
+      },
+    ],
+    components: [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 3,
+            label: 'Random Link',
+            custom_id: 'dispense_random_link',
+          },
+        ],
+      },
+    ],
+  };
+}
+
+async function updatePanelMessage(env, count) {
+  if (!env.DISCORD_TOKEN) return;
+  const rawPanel = await env.LINKS_KV.get('panel_message');
+  if (!rawPanel) return;
+
+  const { channelId, messageId } = JSON.parse(rawPanel);
+  await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bot ${env.DISCORD_TOKEN.trim()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(buildPanelPayload(count)),
+  });
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== 'POST') {
@@ -55,29 +96,41 @@ export default {
       const commandName = interaction.data.name;
 
       if (commandName === 'setup') {
+        const storedBatch = await env.LINKS_KV.get('active_batch');
+        const allLinks = storedBatch ? JSON.parse(storedBatch) : DEFAULT_LINKS;
+        const channelId = interaction.channel_id;
+
+        const msgRes = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bot ${env.DISCORD_TOKEN.trim()}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(buildPanelPayload(allLinks.length)),
+        });
+
+        if (!msgRes.ok) {
+          const errText = await msgRes.text();
+          return Response.json({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: `Failed to post panel (${msgRes.status}): \`${errText}\``,
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        const postedMessage = await msgRes.json();
+        await env.LINKS_KV.put(
+          'panel_message',
+          JSON.stringify({ channelId, messageId: postedMessage.id })
+        );
+
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            embeds: [
-              {
-                title: 'Link Dispenser',
-                description: 'Click the button below to get a random link sent to your DMs.',
-                color: 0x9b59b6,
-              },
-            ],
-            components: [
-              {
-                type: 1,
-                components: [
-                  {
-                    type: 2,
-                    style: 3,
-                    label: 'Random Link',
-                    custom_id: 'dispense_random_link',
-                  },
-                ],
-              },
-            ],
+            content: 'Link Dispenser panel posted!',
+            flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
       }
@@ -102,6 +155,7 @@ export default {
         }
 
         await env.LINKS_KV.put('active_batch', JSON.stringify(uniqueLinks));
+        await updatePanelMessage(env, uniqueLinks.length);
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -113,12 +167,13 @@ export default {
       }
 
       if (commandName === 'clearlinks') {
-        await env.LINKS_KV.delete('active_batch');
+        await env.LINKS_KV.put('active_batch', JSON.stringify([]));
+        await updatePanelMessage(env, 0);
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: 'Previous link batch deleted. The dispenser is now empty until you run `/uploadlinks`.',
+            content: 'Previous link batch deleted. The dispenser is now empty (0 links) until you run `/uploadlinks`.',
             flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
