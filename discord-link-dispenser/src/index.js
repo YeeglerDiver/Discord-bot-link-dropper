@@ -10,10 +10,20 @@ const DEFAULT_LINKS = [
   'https://example.com/link-2',
 ];
 
-function secureRandomIndex(max) {
-  const randomBuffer = new Uint32Array(1);
-  crypto.getRandomValues(randomBuffer);
-  return randomBuffer[0] % max;
+function getTrulyRandomLink(links, lastLink) {
+  const pool = links.length > 1 && lastLink
+    ? links.filter((l) => l !== lastLink)
+    : [...links];
+
+  const array = new Uint32Array(pool.length);
+  crypto.getRandomValues(array);
+
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = array[i] % (i + 1);
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+
+  return pool[0];
 }
 
 export default {
@@ -37,12 +47,10 @@ export default {
 
     const interaction = JSON.parse(body);
 
-    // 1. Discord URL verification ping
     if (interaction.type === InteractionType.PING) {
       return Response.json({ type: InteractionResponseType.PONG });
     }
 
-    // 2. Handle Slash Commands
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
       const commandName = interaction.data.name;
 
@@ -81,7 +89,6 @@ export default {
           .map((link) => link.trim())
           .filter((link) => link.startsWith('http://') || link.startsWith('https://'));
 
-        // Remove duplicate URLs automatically
         const uniqueLinks = [...new Set(parsedLinks)];
 
         if (uniqueLinks.length === 0) {
@@ -118,7 +125,6 @@ export default {
       }
     }
 
-    // 3. Handle Button Click
     if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
       if (interaction.data.custom_id === 'dispense_random_link') {
         const storedBatch = await env.LINKS_KV.get('active_batch');
@@ -145,26 +151,12 @@ export default {
         }
 
         const userId = interaction.member?.user?.id || interaction.user?.id;
+        const lastKey = `last_${userId}`;
+        const lastLink = await env.LINKS_KV.get(lastKey);
 
-        // Check the last 3 links sent to this specific user to avoid repeats
-        const userHistoryKey = `history_${userId}`;
-        const rawHistory = await env.LINKS_KV.get(userHistoryKey);
-        const recentLinks = rawHistory ? JSON.parse(rawHistory) : [];
+        const randomLink = getTrulyRandomLink(allLinks, lastLink);
+        await env.LINKS_KV.put(lastKey, randomLink);
 
-        // Filter out recently sent links if there are enough choices
-        let availableLinks = allLinks.filter((link) => !recentLinks.includes(link));
-        if (availableLinks.length === 0) {
-          availableLinks = allLinks;
-        }
-
-        const randomLink = availableLinks[secureRandomIndex(availableLinks.length)];
-
-        // Update user's recent history (keep up to half the batch size, max 10)
-        const maxHistory = Math.min(10, Math.max(1, allLinks.length - 1));
-        const updatedHistory = [randomLink, ...recentLinks].slice(0, maxHistory);
-        await env.LINKS_KV.put(userHistoryKey, JSON.stringify(updatedHistory));
-
-        // Open DM channel with user
         const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
           method: 'POST',
           headers: {
@@ -187,7 +179,6 @@ export default {
 
         const dmChannel = await dmChannelRes.json();
 
-        // Send link into DM channel
         const msgRes = await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
           method: 'POST',
           headers: {
