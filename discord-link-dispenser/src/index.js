@@ -10,6 +10,9 @@ const DEFAULT_LINKS = [
   'https://example.com/link-2',
 ];
 
+const PANEL_CHANNEL_ID = '1570637765094277140';
+const PANEL_MESSAGE_ID = '1570637882966675558';
+
 function getTrulyRandomLink(links, lastLink) {
   const pool = links.length > 1 && lastLink
     ? links.filter((l) => l !== lastLink)
@@ -52,12 +55,23 @@ function buildPanelPayload(count) {
 }
 
 async function updatePanelMessage(env, count) {
-  if (!env.DISCORD_TOKEN) return;
-  const rawPanel = await env.LINKS_KV.get('panel_message');
-  if (!rawPanel) return;
+  if (!env.DISCORD_TOKEN) return 'Missing DISCORD_TOKEN';
 
-  const { channelId, messageId } = JSON.parse(rawPanel);
-  await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
+  const rawPanel = await env.LINKS_KV.get('panel_message');
+  let channelId = PANEL_CHANNEL_ID;
+  let messageId = PANEL_MESSAGE_ID;
+
+  if (rawPanel) {
+    try {
+      const parsed = JSON.parse(rawPanel);
+      if (parsed.channelId && parsed.messageId) {
+        channelId = parsed.channelId;
+        messageId = parsed.messageId;
+      }
+    } catch (e) {}
+  }
+
+  const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
     method: 'PATCH',
     headers: {
       Authorization: `Bot ${env.DISCORD_TOKEN.trim()}`,
@@ -65,6 +79,13 @@ async function updatePanelMessage(env, count) {
     },
     body: JSON.stringify(buildPanelPayload(count)),
   });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    return `Panel edit failed (${res.status}): ${errText}`;
+  }
+
+  return null;
 }
 
 export default {
@@ -158,12 +179,14 @@ export default {
         const addedCount = combinedLinks.length - existingLinks.length;
 
         await env.LINKS_KV.put('active_batch', JSON.stringify(combinedLinks));
-        await updatePanelMessage(env, combinedLinks.length);
+        const editErr = await updatePanelMessage(env, combinedLinks.length);
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `Added **${addedCount}** new links! Total available: **${combinedLinks.length}**.`,
+            content: editErr
+              ? `Added **${addedCount}** links (Total: **${combinedLinks.length}**), but ${editErr}`
+              : `Added **${addedCount}** new links! Total available: **${combinedLinks.length}**.`,
             flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
@@ -184,12 +207,14 @@ export default {
         const removedCount = existingLinks.length - remainingLinks.length;
 
         await env.LINKS_KV.put('active_batch', JSON.stringify(remainingLinks));
-        await updatePanelMessage(env, remainingLinks.length);
+        const editErr = await updatePanelMessage(env, remainingLinks.length);
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `Removed **${removedCount}** link(s). Total remaining: **${remainingLinks.length}**.`,
+            content: editErr
+              ? `Removed **${removedCount}** link(s) (Remaining: **${remainingLinks.length}**), but ${editErr}`
+              : `Removed **${removedCount}** link(s). Total remaining: **${remainingLinks.length}**.`,
             flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
@@ -197,12 +222,14 @@ export default {
 
       if (commandName === 'clearlinks') {
         await env.LINKS_KV.put('active_batch', JSON.stringify([]));
-        await updatePanelMessage(env, 0);
+        const editErr = await updatePanelMessage(env, 0);
 
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: 'All links deleted. The dispenser is now empty (0 links).',
+            content: editErr
+              ? `All links deleted, but ${editErr}`
+              : 'All links deleted. The dispenser is now empty (0 links).',
             flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
