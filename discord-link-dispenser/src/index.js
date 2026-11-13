@@ -12,11 +12,13 @@ const DEFAULT_LINKS = [
 
 const PANEL_CHANNEL_ID = '1570637765094277140';
 const PANEL_MESSAGE_ID = '1570637882966675558';
+const DAILY_LIMIT = 15;
 
-function getTrulyRandomLink(links, lastLink) {
-  const pool = links.length > 1 && lastLink
-    ? links.filter((l) => l !== lastLink)
-    : [...links];
+function getRandomBatch(links, count, lastLinks = []) {
+  let pool = links.filter((l) => !lastLinks.includes(l));
+  if (pool.length < count) {
+    pool = [...links];
+  }
 
   const array = new Uint32Array(pool.length);
   crypto.getRandomValues(array);
@@ -26,7 +28,7 @@ function getTrulyRandomLink(links, lastLink) {
     [pool[i], pool[j]] = [pool[j], pool[i]];
   }
 
-  return pool[0];
+  return pool.slice(0, Math.min(count, pool.length));
 }
 
 function buildPanelPayload(count) {
@@ -34,7 +36,7 @@ function buildPanelPayload(count) {
     embeds: [
       {
         title: 'Link Dispenser',
-        description: `Click the button below to get a random link sent to your DMs.\n\n**Available Links:** ${count}`,
+        description: `Click a button below to get random links sent to your DMs.\nDaily limit: **${DAILY_LIMIT} links per day**.\n\n**Available Links:** ${count}`,
         color: 0x9b59b6,
       },
     ],
@@ -45,8 +47,20 @@ function buildPanelPayload(count) {
           {
             type: 2,
             style: 3,
-            label: 'Random Link',
-            custom_id: 'dispense_random_link',
+            label: '5 Random Links',
+            custom_id: 'dispense_5',
+          },
+          {
+            type: 2,
+            style: 1,
+            label: '10 Random Links',
+            custom_id: 'dispense_10',
+          },
+          {
+            type: 2,
+            style: 2,
+            label: '15 Random Links',
+            custom_id: 'dispense_15',
           },
         ],
       },
@@ -237,7 +251,9 @@ export default {
     }
 
     if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
-      if (interaction.data.custom_id === 'dispense_random_link') {
+      const customId = interaction.data.custom_id;
+      if (customId === 'dispense_5' || customId === 'dispense_10' || customId === 'dispense_15') {
+        const requestedCount = parseInt(customId.split('_')[1], 10);
         const storedBatch = await env.LINKS_KV.get('active_batch');
         const allLinks = storedBatch ? JSON.parse(storedBatch) : DEFAULT_LINKS;
 
@@ -262,11 +278,42 @@ export default {
         }
 
         const userId = interaction.member?.user?.id || interaction.user?.id;
-        const lastKey = `last_${userId}`;
-        const lastLink = await env.LINKS_KV.get(lastKey);
+        const today = new Date().toISOString().split('T')[0];
+        const usageKey = `daily_${userId}_${today}`;
 
-        const randomLink = getTrulyRandomLink(allLinks, lastLink);
-        await env.LINKS_KV.put(lastKey, randomLink);
+        const rawUsage = await env.LINKS_KV.get(usageKey);
+        const usageData = rawUsage ? JSON.parse(rawUsage) : { count: 0, recent: [] };
+        const remainingAllowance = DAILY_LIMIT - usageData.count;
+
+        if (remainingAllowance <= 0) {
+          return Response.json({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: `You have reached your daily limit of **${DAILY_LIMIT}** links! Come back tomorrow.`,
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        if (requestedCount > remainingAllowance) {
+          return Response.json({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: `You only have **${remainingAllowance}** link(s) left in your daily limit (${usageData.count}/${DAILY_LIMIT} used today). Click a smaller button!`,
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        const selectedLinks = getRandomBatch(allLinks, requestedCount, usageData.recent);
+        const newCount = usageData.count + selectedLinks.length;
+        const updatedRecent = [...selectedLinks, ...usageData.recent].slice(0, 15);
+
+        await env.LINKS_KV.put(
+          usageKey,
+          JSON.stringify({ count: newCount, recent: updatedRecent }),
+          { expirationTtl: 172800 }
+        );
 
         const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
           method: 'POST',
@@ -289,6 +336,7 @@ export default {
         }
 
         const dmChannel = await dmChannelRes.json();
+        const formattedLinks = selectedLinks.map((link, idx) => `${idx + 1}. ${link}`).join('\n');
 
         const msgRes = await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
           method: 'POST',
@@ -296,7 +344,9 @@ export default {
             Authorization: `Bot ${env.DISCORD_TOKEN.trim()}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ content: `Here is your link: ${randomLink}` }),
+          body: JSON.stringify({
+            content: `Here are your **${selectedLinks.length}** random links (${newCount}/${DAILY_LIMIT} used today):\n\n${formattedLinks}`,
+          }),
         });
 
         if (!msgRes.ok) {
@@ -313,7 +363,7 @@ export default {
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: 'Check your DMs!',
+            content: `Sent **${selectedLinks.length}** links to your DMs! (**${DAILY_LIMIT - newCount}** remaining today)`,
             flags: InteractionResponseFlags.EPHEMERAL,
           },
         });
