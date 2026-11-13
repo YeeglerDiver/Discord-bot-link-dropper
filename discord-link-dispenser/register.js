@@ -7,6 +7,24 @@ const commands = [
     description: 'Post the Link Dispenser embed and button in this channel',
     default_member_permissions: '8',
   },
+  {
+    name: 'uploadlinks',
+    description: 'Delete the previous batch and upload new links',
+    default_member_permissions: '8',
+    options: [
+      {
+        name: 'links',
+        description: 'Paste your links separated by spaces or commas',
+        type: 3, // STRING
+        required: true,
+      },
+    ],
+  },
+  {
+    name: 'clearlinks',
+    description: 'Delete all links in the current batch',
+    default_member_permissions: '8',
+  },
 ];
 
 async function registerCommands() {
@@ -21,7 +39,7 @@ async function registerCommands() {
   });
 
   if (response.ok) {
-    console.log('Successfully registered /setup command!');
+    console.log('Successfully registered /setup, /uploadlinks, and /clearlinks!');
   } else {
     console.error('Error registering commands:', await response.text());
   }

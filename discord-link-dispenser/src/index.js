@@ -5,15 +5,13 @@ import {
   verifyKey,
 } from 'discord-interactions';
 
-// Add your links here and push to GitHub to update
-const LINKS = [
+// Fallback links if KV is empty
+const DEFAULT_LINKS = [
   'https://example.com/link-1',
   'https://example.com/link-2',
-  'https://example.com/link-3',
 ];
 
 async function sendDirectMessage(userId, content, botToken) {
-  // 1. Open (or fetch) a DM channel with the user
   const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
     method: 'POST',
     headers: {
@@ -26,7 +24,6 @@ async function sendDirectMessage(userId, content, botToken) {
   if (!dmChannelRes.ok) return false;
   const dmChannel = await dmChannelRes.json();
 
-  // 2. Send the message into that DM channel
   const msgRes = await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
     method: 'POST',
     headers: {
@@ -65,9 +62,12 @@ export default {
       return Response.json({ type: InteractionResponseType.PONG });
     }
 
-    // 2. Handle /setup command to post the Embed + Button panel
+    // 2. Handle Slash Commands
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
-      if (interaction.data.name === 'setup') {
+      const commandName = interaction.data.name;
+
+      // /setup -> Posts the Embed + Button
+      if (commandName === 'setup') {
         return Response.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
@@ -75,16 +75,16 @@ export default {
               {
                 title: 'Link Dispenser',
                 description: 'Click the button below to get a random link sent to your DMs.',
-                color: 0x9b59b6, // Purple accent bar
+                color: 0x9b59b6,
               },
             ],
             components: [
               {
-                type: 1, // Action Row
+                type: 1,
                 components: [
                   {
-                    type: 2, // Button
-                    style: 3, // Green button (use 1 for Blurple, 2 for Grey)
+                    type: 2,
+                    style: 3,
                     label: 'Random Link',
                     custom_id: 'dispense_random_link',
                   },
@@ -94,15 +94,71 @@ export default {
           },
         });
       }
+
+      // /uploadlinks -> Replaces the previous batch with a new list
+      if (commandName === 'uploadlinks') {
+        const rawInput = interaction.data.options?.[0]?.value || '';
+        // Split by spaces, commas, or newlines and keep valid links
+        const newLinks = rawInput
+          .split(/[\s,]+/)
+          .map((link) => link.trim())
+          .filter((link) => link.startsWith('http://') || link.startsWith('https://'));
+
+        if (newLinks.length === 0) {
+          return Response.json({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: 'No valid links found. Make sure links start with `https://` or `http://`.',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        // Overwrite the previous batch in Cloudflare KV
+        await env.LINKS_KV.put('active_batch', JSON.stringify(newLinks));
+
+        return Response.json({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: `Deleted the previous batch and uploaded **${newLinks.length}** new links!`,
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      // /clearlinks -> Deletes the current batch completely
+      if (commandName === 'clearlinks') {
+        await env.LINKS_KV.delete('active_batch');
+
+        return Response.json({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: 'Previous link batch deleted. The dispenser is now empty until you run `/uploadlinks`.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
     }
 
     // 3. Handle Button Click
     if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
       if (interaction.data.custom_id === 'dispense_random_link') {
-        const userId = interaction.member?.user?.id || interaction.user?.id;
-        const randomLink = LINKS[Math.floor(Math.random() * LINKS.length)];
+        const storedBatch = await env.LINKS_KV.get('active_batch');
+        const links = storedBatch ? JSON.parse(storedBatch) : DEFAULT_LINKS;
 
-        // Send the DM asynchronously while responding to the click immediately
+        if (!links || links.length === 0) {
+          return Response.json({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: 'No links are currently stocked! Check back later.',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        const userId = interaction.member?.user?.id || interaction.user?.id;
+        const randomLink = links[Math.floor(Math.random() * links.length)];
+
         ctx.waitUntil(
           sendDirectMessage(userId, `Here is your link: ${randomLink}`, env.DISCORD_TOKEN)
         );
